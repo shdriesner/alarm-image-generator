@@ -3,90 +3,63 @@
 # make odroid images
 #
 
+deps=(
+    partx losetup fdisk
+    mkfs.vfat mkfs.ext4
+    wget curl tar sudo
+    arch-chroot yay
+)
+
 # Check if required dependencies are met.
-if ! which partx 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES partx"
-fi
+DEPENDENCIES=()
+for dep in "${deps[@]}"
+do
+    command -v ${dep} 1>/dev/null 2>/dev/null || DEPENDENCIES+=( "${dep}" )
+done
 
-if ! which losetup 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES losetup"
-fi
+# exit if not all dependencies are available
+[ 0 == ${#DEPENDENCIES} ] || \
+    { echo "Please install '${DEPENDENCIES[@]}' to use this script." 1>&2; exit 1; }
 
-if ! which fdisk 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES fdisk"
-fi
+# collect supported platforms
+platforms=(
+    $(find platform -maxdepth 1 -type f -name "*.sh" | xargs -r basename -a | sed -e 's:[.]sh$::' | sort -u)
+)
 
-if ! which mkfs.vfat 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES mkfs.vfat"
-fi
+# collect supported environments
+environments=(
+    $(find env -maxdepth 1 -type f -name "*.sh" | xargs -r basename -a | sed -e 's:[.]sh$::' | sort -u)
+)
 
-if ! which mkfs.ext4 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES mkfs.ext4"
-fi
+# global environment variables
+NAME=""
+IMAGE=""
+PLATFORM=""
+ENVIRONMENT="xfce" # default
 
-if ! which wget 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES wget"
-fi
-
-if ! which curl 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES curl"
-fi
-
-if ! which arch-chroot 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES arch-chroot"
-fi
-
-if ! which tar 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES tar"
-fi
-
-if ! which sudo 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES sudo"
-fi
-
-if ! which yay 1>/dev/null ; then
-    DEPENDENCIES="$DEPENDECIES yay"
-fi
-
-if [ "$DEPENDENCIES" != "" ]; then
-    DEPENDENCIES_TRIM="$(echo "${DEPENDENCIES}" | sed 's/^ *//' 's/ *$//')"
-    echo "Please install '$DEPENDENCIES' to use this script." 1>&2
-    exit
-fi
-
-alarm_check_root() {
-    if [ $(id -u) -ne 0 ]; then
-        echo "You need to be root to execute this command." 1>&2
-        exit 1
-    fi
+# functions
+function alarm_check_root() {
+    [ 0 == $(id -u) ] || \
+        { echo "You need to be root to execute this command." 1>&2; exit 1; }
 }
 
 # Set image name and file download name
-alarm_set_name() {
-    NAME=""
-    for arg in "$@"; do
-        case "$arg" in
-          "n2")
-              NAME="ArchLinuxARM-odroid-n2-latest"
-              IMAGE="ArchLinuxARM-odroid-n2"
-              PLATFORM="n2"
-              ;;
-          "c4")
-              NAME="ArchLinuxARM-odroid-n2-latest"
-              IMAGE="ArchLinuxARM-odroid-c4"
-              PLATFORM="c4"
-              ;;
-        esac
-    done
-
-    if [ "$NAME" = "" ]; then
-        echo "Platform not supported." 1>&2
+function alarm_set_platform() {
+    local arg=$1
+    NAME="ArchLinuxARM-${arg}-latest"
+    IMAGE="ArchLinuxARM-${arg}"
+    PLATFORM="${arg}"
+    # fail if platform not available
+    if [ "X" == "X${PLATFORM}" ]; then
+        echo "No platform defined" 1>&2
+        exit 1
+    elif [ ! -e "platform/${PLATFORM}.sh" ]; then
+        echo "Platform '${PLATFORM}' not yet supported" 1>&2
         exit 1
     fi
 }
 
-alarm_set_env() {
-    ENVIRONMENT=""
+function alarm_set_env() {
     while [ "$1" ]; do
         case "$1" in
           "-e")
@@ -96,11 +69,12 @@ alarm_set_env() {
         esac
         shift
     done
-
-    if [ "$ENVIRONMENT" = "" ]; then
-        ENVIRONMENT="xfce"
-    elif [ ! -e "environments/${ENVIRONMENT}.sh" ]; then
-        echo "Invalid environment: '${ENVIRONMENT}'" 1>&2
+    # fail if environment not available
+    if [ "X" == "X${ENVIRONMENT}" ]; then
+        echo "No environment defined" 1>&2
+        exit 1
+    elif [ ! -e "env/${ENVIRONMENT}.sh" ]; then
+        echo "Environment '${ENVIRONMENT}' not yet supported" 1>&2
         exit 1
     fi
 }
@@ -109,7 +83,7 @@ alarm_set_env() {
 alarm_umount_image() {
     image=$(losetup -j "${1}".img | cut -d: -f1)
 
-    if echo $image | grep loop ; then
+    if echo ${image} | grep loop ; then
         if [ -e boot ]; then
             sudo umount boot
             rmdir boot
@@ -158,7 +132,8 @@ alarm_build_package() {
 
 case "$1" in
     "build")
-        alarm_set_name $@
+	shift
+        alarm_set_platform $1; shift
         alarm_set_env $@
         echo "--DETAILS-------------------------------------------------------"
         echo "  Platform:          $PLATFORM"
@@ -167,15 +142,12 @@ case "$1" in
         ;;
     "umount")
         shift
-        alarm_set_name $1
-        alarm_umount_image $IMAGE
-        exit
-        ;;
+        alarm_set_platform $1
+        alarm_umount_image ${IMAGE}
+        exit 0;;
     "clean")
-        rm *.img
-        rm *.tar.gz
-        exit
-        ;;
+        rm -vf *.img *.tar.gz
+        exit 0;;
     *)
         echo "Usage: build.sh <command> [<arguments>]"
         echo "Creates a ready to burn ArchLinuxARM image."
@@ -190,25 +162,18 @@ case "$1" in
         echo "  clean"
         echo "  Removes generated images and downloaded tarballs."
         echo ""
-        echo "Available platforms: "
-        ls platform | sed "s/^/  /g" | sed "s/.sh$//g"
+        echo "Available platforms: ${platforms[@]}"
         echo ""
-        echo "Available environments: "
-        ls env | grep -v base.sh | sed "s/^/  /g" | sed "s/.sh$//g"
-        exit
+        echo "Available environments: ${environments[@]}"
+        exit 0
 esac
 
 #
 # INCLUDE PLATFORM AND ENVIRONMENT HOOKS
 #
-if [ -e "platform/${PLATFORM}.sh" ]; then
-    source "platform/${PLATFORM}.sh"
-fi
-
-if [ -e "env/${ENVIRONMENT}.sh" ]; then
-    source "env/${ENVIRONMENT}.sh"
-fi
-
+for f in "platform/${PLATFORM}.sh" "env/${ENVIRONMENT}.sh"; do
+    [ -e "${f}" ] && source "${f}"
+done
 
 #
 # DOWNLOAD
